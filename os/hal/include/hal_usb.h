@@ -479,6 +479,25 @@ typedef const USBDescriptor * (*usbgetdescriptor_t)(USBDriver *usbp,
   (usbp)->ep0defer = false;                                                 \
   (usbp)->ep0next  = (buf);                                                 \
   (usbp)->ep0n     = (n);                                                   \
+  (usbp)->ep0zlp   = false;                                                 \
+  (usbp)->ep0endcb = (endcb);                                               \
+}
+
+/**
+ * @brief   Request zero-length IN setup transfer.
+ * @details This macro is used by the request handling callbacks in order to
+ *          prepare a zero-length packet transaction over the endpoint zero.
+ *
+ * @param[in] usbp      pointer to the @p USBDriver object
+ * @param[in] endcb     callback to be invoked after the transfer or @p NULL
+ *
+ * @special
+ */
+#define usbSetupTransferZLP(usbp, endcb) {                                  \
+  (usbp)->ep0defer = false;                                                 \
+  (usbp)->ep0next  = NULL;                                                  \
+  (usbp)->ep0n     = 0u;                                                    \
+  (usbp)->ep0zlp   = true;                                                  \
   (usbp)->ep0endcb = (endcb);                                               \
 }
 
@@ -495,6 +514,7 @@ typedef const USBDescriptor * (*usbgetdescriptor_t)(USBDriver *usbp,
   (usbp)->ep0defer = true;                                                  \
   (usbp)->ep0next  = NULL;                                                  \
   (usbp)->ep0n     = 0;                                                     \
+  (usbp)->ep0zlp   = false;                                                 \
   (usbp)->ep0endcb = NULL;                                                  \
 }
 

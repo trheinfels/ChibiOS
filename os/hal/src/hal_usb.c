@@ -937,9 +937,9 @@ void _usb_ep0transferI(USBDriver *usbp) {
   }
   if ((usbp->setup[0] & USB_RTYPE_DIR_MASK) == USB_RTYPE_DIR_DEV2HOST) {
     /* IN phase.*/
-    if (usbp->ep0n != 0U) {
+    if (usbp->ep0n != 0U || usbp->ep0zlp) {
       /* Starts the transmit phase.*/
-      usbp->ep0state = USB_EP0_IN_TX;
+      usbp->ep0state = (usbp->ep0n > 0u) ? USB_EP0_IN_TX : USB_EP0_IN_WAITING_TX0;
       osalSysLockFromISR();
       usbStartTransmitI(usbp, 0, usbp->ep0next, usbp->ep0n);
       osalSysUnlockFromISR();
@@ -967,6 +967,7 @@ void _usb_ep0transferI(USBDriver *usbp) {
       osalSysUnlockFromISR();
     }
     else {
+      osalDbgAssert(!usbp->ep0zlp, "ZLP invalid for EP0 OUT");
       /* No receive phase, directly sending the zero sized status
          packet.*/
       usbp->ep0state = USB_EP0_IN_SENDING_STS;
