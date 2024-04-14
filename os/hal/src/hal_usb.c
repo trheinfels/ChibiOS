@@ -371,6 +371,11 @@ void usbStop(USBDriver *usbp) {
 #endif
     usbp->epc[i] = NULL;
   }
+
+#if USB_USE_WAIT == TRUE
+  osalThreadResumeI(&usbp->ep0deferthread, MSG_RESET);
+#endif
+
   osalOsRescheduleS();
 
   osalSysUnlock();
@@ -448,6 +453,10 @@ void usbDisableEndpointsI(USBDriver *usbp) {
 #endif
     usbp->epc[i] = NULL;
   }
+
+#if USB_USE_WAIT == TRUE
+  osalThreadResumeI(&usbp->ep0deferthread, MSG_RESET);
+#endif
 
   /* Low level endpoints deactivation.*/
   usb_lld_disable_endpoints(usbp);
@@ -532,6 +541,29 @@ void usbStartTransmitI(USBDriver *usbp, usbep_t ep,
   usb_lld_start_in(usbp, ep);
 }
 
+void usbSetupDeferredTransferI(USBDriver *usbp, uint8_t *buf, size_t n,
+                               usbcallback_t endcb) {
+
+  osalDbgCheckClassI();
+  osalDbgCheck(usbp != NULL);
+  osalDbgAssert(usbp->ep0state == USB_EP0_DEFER_WAITING, "invalid ep0 state");
+
+  usbSetupTransfer(usbp, buf, n, endcb);
+  _usb_ep0transferI(usbp);
+}
+
+void usbStallDeferredTransferI(USBDriver *usbp) {
+
+  osalDbgCheckClassI();
+  osalDbgCheck(usbp != NULL);
+  osalDbgAssert(usbp->ep0state == USB_EP0_DEFER_WAITING, "invalid ep0 state");
+
+  usb_lld_stall_in(usbp, 0);
+  usb_lld_stall_out(usbp, 0);
+  // _usb_isr_invoke_event_cb(usbp, USB_EVENT_STALLED);
+  usbp->ep0state = USB_EP0_ERROR;
+}
+
 #if (USB_USE_WAIT == TRUE) || defined(__DOXYGEN__)
 /**
  * @brief   Performs a receive transaction on an OUT endpoint.
@@ -597,6 +629,26 @@ msg_t usbTransmit(USBDriver *usbp, usbep_t ep, const uint8_t *buf, size_t n) {
   msg = osalThreadSuspendS(&usbp->epc[ep]->in_state->thread);
   osalSysUnlock();
 
+  return msg;
+}
+
+msg_t usbCompleteDeferredTransfer(USBDriver *usbp, uint8_t *buf, size_t n) {
+  msg_t msg = MSG_RESET;
+
+  osalSysLock();
+
+  switch (usbGetDriverStateI(usbp)) {
+  case USB_READY:
+  case USB_SELECTED:
+  case USB_ACTIVE:
+    usbSetupDeferredTransferI(usbp, buf, n, NULL);
+    msg = osalThreadSuspendS(&usbp->ep0deferthread);
+   break;
+  default:
+   break;
+  }
+
+  osalSysUnlock();
   return msg;
 }
 #endif /* USB_USE_WAIT == TRUE */
@@ -708,6 +760,12 @@ void _usb_reset(USBDriver *usbp) {
     usbp->epc[i] = NULL;
   }
 
+#if USB_USE_WAIT == TRUE
+  osalSysLockFromISR();
+  osalThreadResumeI(&usbp->ep0deferthread, MSG_RESET);
+  osalSysUnlockFromISR();
+#endif
+
   /* EP0 state machine initialization.*/
   usbp->ep0state = USB_EP0_STP_WAITING;
 
@@ -758,6 +816,10 @@ void _usb_suspend(USBDriver *usbp) {
         osalSysUnlockFromISR();
       }
     }
+
+    osalSysLockFromISR();
+    osalThreadResumeI(&usbp->ep0deferthread, MSG_RESET);
+    osalSysUnlockFromISR();
   }
 #endif
 }
@@ -791,12 +853,24 @@ void _usb_wakeup(USBDriver *usbp) {
  * @notapi
  */
 void _usb_ep0setup(USBDriver *usbp, usbep_t ep) {
-  size_t max;
-
   /* Is the EP0 state machine in the correct state for handling setup
      packets?*/
   if (usbp->ep0state != USB_EP0_STP_WAITING) {
     /* This is unexpected could require handling with a warning event.*/
+    /* If the user deferred a transfer and the host is requesting another
+       the user has taken too long and the host has given up on the previous
+       transfer.  Notify the user so they can potentially cleanup. */
+    if (usbp->ep0state == USB_EP0_DEFER_WAITING) {
+      _usb_isr_invoke_event_cb(usbp, USB_EVENT_DEFER_TIMEOUT);
+    }
+
+#if USB_USE_WAIT == TRUE
+      osalSysLockFromISR();
+      osalThreadResumeI(&usbp->ep0deferthread, MSG_RESET);
+      osalSysUnlockFromISR();
+#endif
+
+    /* Other cases unexpected.  Could require handling with a warning event.*/
     /* CHTODO: handling here.*/
 
     /* Resetting the EP0 state machine and going ahead.*/
@@ -818,14 +892,17 @@ void _usb_ep0setup(USBDriver *usbp, usbep_t ep) {
     if (((usbp->setup[0] & USB_RTYPE_TYPE_MASK) != USB_RTYPE_TYPE_STD) ||
         !default_handler(usbp)) {
     /*lint -restore*/
-      /* Error response, the state machine goes into an error state, the low
-         level layer will have to reset it to USB_EP0_WAITING_SETUP after
-         receiving a SETUP packet.*/
-      usb_lld_stall_in(usbp, 0);
-      usb_lld_stall_out(usbp, 0);
-      _usb_isr_invoke_event_cb(usbp, USB_EVENT_STALLED);
-      usbp->ep0state = USB_EP0_ERROR;
-      return;
+      if ((usbp->config->requests_hook2_cb == NULL) ||
+          !(usbp->config->requests_hook2_cb(usbp))) {
+        /* Error response, the state machine goes into an error state, the low
+          level layer will have to reset it to USB_EP0_WAITING_SETUP after
+          receiving a SETUP packet.*/
+        usb_lld_stall_in(usbp, 0);
+        usb_lld_stall_out(usbp, 0);
+        _usb_isr_invoke_event_cb(usbp, USB_EVENT_STALLED);
+        usbp->ep0state = USB_EP0_ERROR;
+        return;
+      }
     }
   }
 #if (USB_SET_ADDRESS_ACK_HANDLING == USB_SET_ADDRESS_ACK_HW)
@@ -834,6 +911,22 @@ void _usb_ep0setup(USBDriver *usbp, usbep_t ep) {
     return;
   }
 #endif
+
+  if (usbp->ep0defer) {
+    usbp->ep0state = USB_EP0_DEFER_WAITING;
+    return;
+  }
+
+  osalSysLockFromISR();
+  _usb_ep0transferI(usbp);
+  osalSysUnlockFromISR();
+}
+
+void _usb_ep0transferI(USBDriver *usbp) {
+  size_t max;
+
+  osalDbgCheckClassI();
+
   /* Transfer preparation. The request handler must have populated
      correctly the fields ep0next, ep0n and ep0endcb using the macro
      usbSetupTransfer().*/
@@ -933,6 +1026,11 @@ void _usb_ep0in(USBDriver *usbp, usbep_t ep) {
     if (usbp->ep0endcb != NULL) {
       usbp->ep0endcb(usbp);
     }
+#if USB_USE_WAIT == TRUE
+    osalSysLockFromISR();
+    osalThreadResumeI(&usbp->ep0deferthread, MSG_OK);
+    osalSysUnlockFromISR();
+#endif
     usbp->ep0state = USB_EP0_STP_WAITING;
     return;
   case USB_EP0_STP_WAITING:
@@ -991,6 +1089,11 @@ void _usb_ep0out(USBDriver *usbp, usbep_t ep) {
     if (usbp->ep0endcb != NULL) {
       usbp->ep0endcb(usbp);
     }
+#if USB_USE_WAIT == TRUE
+    osalSysLockFromISR();
+    osalThreadResumeI(&usbp->ep0deferthread, MSG_OK);
+    osalSysUnlockFromISR();
+#endif
     usbp->ep0state = USB_EP0_STP_WAITING;
     return;
   case USB_EP0_STP_WAITING:
