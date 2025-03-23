@@ -294,7 +294,8 @@ typedef enum {
   USB_EP0_IN_SENDING_STS = USB_IN_STATE | 3U,   /**< Sending status.        */
   USB_EP0_OUT_WAITING_STS = USB_OUT_STATE | 4U, /**< Waiting status.        */
   USB_EP0_OUT_RX = USB_OUT_STATE | 5U,          /**< Receiving.             */
-  USB_EP0_ERROR = 6U                            /**< Error, EP0 stalled.    */
+  USB_EP0_DEFER_WAITING = 6U,                   /**< Waiting for Deferral.  */
+  USB_EP0_ERROR = 7U                            /**< Error, EP0 stalled.    */
 } usbep0state_t;
 
 /**
@@ -307,7 +308,8 @@ typedef enum {
   USB_EVENT_UNCONFIGURED = 3,           /**< Configuration removed.         */
   USB_EVENT_SUSPEND = 4,                /**< Entering suspend mode.         */
   USB_EVENT_WAKEUP = 5,                 /**< Leaving suspend mode.          */
-  USB_EVENT_STALLED = 6                 /**< Endpoint 0 error, stalled.     */
+  USB_EVENT_STALLED = 6,                /**< Endpoint 0 error, stalled.     */
+  USB_EVENT_DEFER_TIMEOUT = 7           /**< Endpoint 0 deferral timeout.   */
 } usbevent_t;
 
 /**
@@ -474,9 +476,26 @@ typedef const USBDescriptor * (*usbgetdescriptor_t)(USBDriver *usbp,
  * @special
  */
 #define usbSetupTransfer(usbp, buf, n, endcb) {                             \
+  (usbp)->ep0defer = false;                                                 \
   (usbp)->ep0next  = (buf);                                                 \
   (usbp)->ep0n     = (n);                                                   \
   (usbp)->ep0endcb = (endcb);                                               \
+}
+
+/**
+ * @brief   Defer transfer setup.
+ * @details This macro is used by the request handling callbacks in order to
+ *          defer a transaction over the endpoint zero.
+ *
+ * @param[in] usbp      pointer to the @p USBDriver object
+ *
+ * @special
+ */
+#define usbDeferTransfer(usbp) {                                            \
+  (usbp)->ep0defer = true;                                                  \
+  (usbp)->ep0next  = NULL;                                                  \
+  (usbp)->ep0n     = 0;                                                     \
+  (usbp)->ep0endcb = NULL;                                                  \
 }
 
 /**
@@ -614,9 +633,13 @@ extern "C" {
                         uint8_t *buf, size_t n);
   void usbStartTransmitI(USBDriver *usbp, usbep_t ep,
                          const uint8_t *buf, size_t n);
+  void usbSetupDeferredTransferI(USBDriver *usbp, uint8_t *buf, size_t n,
+                                 usbcallback_t endcb);
+  void usbStallDeferredTransferI(USBDriver *usbp);
 #if USB_USE_WAIT == TRUE
   msg_t usbReceive(USBDriver *usbp, usbep_t ep, uint8_t *buf, size_t n);
   msg_t usbTransmit(USBDriver *usbp, usbep_t ep, const uint8_t *buf, size_t n);
+  msg_t usbCompleteDeferredTransfer(USBDriver *usbp, uint8_t *buf, size_t n);
 #endif
   bool usbStallReceiveI(USBDriver *usbp, usbep_t ep);
   bool usbStallTransmitI(USBDriver *usbp, usbep_t ep);
@@ -625,6 +648,7 @@ extern "C" {
   void _usb_suspend(USBDriver *usbp);
   void _usb_wakeup(USBDriver *usbp);
   void _usb_ep0setup(USBDriver *usbp, usbep_t ep);
+  void _usb_ep0transferI(USBDriver *usbp);
   void _usb_ep0in(USBDriver *usbp, usbep_t ep);
   void _usb_ep0out(USBDriver *usbp, usbep_t ep);
 #ifdef __cplusplus
