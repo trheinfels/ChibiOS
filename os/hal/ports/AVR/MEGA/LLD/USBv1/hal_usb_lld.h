@@ -294,6 +294,10 @@ struct USBDriver {
    */
   size_t                        ep0n;
   /**
+   * @brief   Flag indicating that a zero-length IN packet should be sent through endpoint 0.
+   */
+  bool                          ep0zlp;
+  /**
    * @brief   Endpoint 0 end transaction callback.
    */
   usbcallback_t                 ep0endcb;
